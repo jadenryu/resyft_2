@@ -1,0 +1,214 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: antibody-backend
+  labels:
+    app: antibody
+    component: backend
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: antibody
+      component: backend
+  template:
+    metadata:
+      labels:
+        app: antibody
+        component: backend
+    spec:
+      containers:
+      - name: backend
+        image: antibody-backend:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8000
+          name: http
+        env:
+        - name: POSTGRES_HOST
+          value: "postgres-service"
+        - name: NEO4J_URI
+          value: "bolt://neo4j-service:7687"
+        - name: REDIS_HOST
+          value: "redis-service"
+        - name: QDRANT_HOST
+          value: "qdrant-service"
+        - name: SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: antibody-secrets
+              key: secret-key
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: antibody-secrets
+              key: postgres-password
+        - name: NEO4J_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: antibody-secrets
+              key: neo4j-password
+        - name: GROK_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: antibody-secrets
+              key: grok-api-key
+        - name: COHERE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: antibody-secrets
+              key: cohere-api-key
+        - name: X_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: antibody-secrets
+              key: x-api-key
+        - name: X_BEARER_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: antibody-secrets
+              key: x-bearer-token
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 5
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: antibody-celery-worker
+  labels:
+    app: antibody
+    component: celery-worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: antibody
+      component: celery-worker
+  template:
+    metadata:
+      labels:
+        app: antibody
+        component: celery-worker
+    spec:
+      containers:
+      - name: celery-worker
+        image: antibody-backend:latest
+        imagePullPolicy: Always
+        command: ["celery", "-A", "app.workers.celery_app", "worker", "--loglevel=info", "--concurrency=4"]
+        env:
+        - name: POSTGRES_HOST
+          value: "postgres-service"
+        - name: NEO4J_URI
+          value: "bolt://neo4j-service:7687"
+        - name: REDIS_HOST
+          value: "redis-service"
+        - name: QDRANT_HOST
+          value: "qdrant-service"
+        - name: SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: antibody-secrets
+              key: secret-key
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: antibody-secrets
+              key: postgres-password
+        - name: NEO4J_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: antibody-secrets
+              key: neo4j-password
+        - name: GROK_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: antibody-secrets
+              key: grok-api-key
+        - name: COHERE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: antibody-secrets
+              key: cohere-api-key
+        - name: X_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: antibody-secrets
+              key: x-api-key
+        - name: X_BEARER_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: antibody-secrets
+              key: x-bearer-token
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "4Gi"
+            cpu: "2000m"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: antibody-frontend
+  labels:
+    app: antibody
+    component: frontend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: antibody
+      component: frontend
+  template:
+    metadata:
+      labels:
+        app: antibody
+        component: frontend
+    spec:
+      containers:
+      - name: frontend
+        image: antibody-frontend:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 3000
+          name: http
+        env:
+        - name: NEXT_PUBLIC_API_URL
+          value: "http://antibody-backend-service:8000"
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 3000
+          initialDelaySeconds: 10
+          periodSeconds: 5
