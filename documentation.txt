@@ -1,0 +1,203 @@
+# GrokiPedia Antibody: Technical Specification for Implementation
+
+## Project Summary
+
+Antibody is a proactive knowledge integrity platform for GrokiPedia. It ingests encyclopedia articles, extracts individual claims, maps their dependency relationships in a graph database, predicts which claims will decay over time, and actively searches for contradicting sources across multiple languages. The system surfaces a prioritized queue of vulnerable claims through an interactive dashboard where editors can review and remediate issues before misinformation propagates.
+
+The platform must handle millions of articles, serve thousands of concurrent users, and process real-time signals from external APIs without degradation.
+
+---
+
+## Architecture Overview
+
+The application follows a microservices-inspired monorepo structure with clear separation between ingestion, processing, storage, and presentation layers. All services communicate through a message queue to ensure non-blocking operations and horizontal scalability.
+
+The ingestion layer accepts article dumps and streaming updates, passing them to the processing layer. The processing layer extracts claims via the Grok API, computes decay scores, and runs adversarial retrieval. The storage layer maintains three databases: a graph database for claim dependencies, a vector database for semantic search, and a relational database for user data and audit logs. The presentation layer serves a Next.js application that visualizes the dependency graph and displays the triage queue.
+
+---
+
+## Technology Stack
+
+### Backend Framework
+Use **FastAPI** (Python 3.11+) for all backend services. FastAPI provides async support out of the box, automatic OpenAPI documentation, and native Pydantic validation. For a system processing millions of articles, the async capabilities prevent blocking during external API calls to Grok and X.
+
+### Task Queue
+Use **Celery** with **Redis** as the message broker. Celery workers handle long-running tasks like claim extraction, adversarial retrieval, and decay score computation. Redis provides fast in-memory message passing and also serves as the caching layer for frequently accessed graph queries.
+
+### Graph Database
+Use **Neo4j** (version 5.x) with the APOC plugin library. Neo4j stores the claim dependency graph where nodes represent individual claims and edges represent epistemic support relationships. Each node contains properties for the claim text, source URL, extraction timestamp, decay score, and contradiction count. Neo4j handles traversal queries efficiently even at millions of nodes, and Cypher queries can compute downstream impact scores in milliseconds.
+
+### Vector Database
+Use **Qdrant** (latest stable) for storing multilingual embeddings. Qdrant supports filtered vector search, allowing queries like "find contradicting claims in Mandarin sources with confidence above 0.8." It scales horizontally through sharding and handles billions of vectors with sub-second query times.
+
+### Embedding Model
+Use **Cohere embed-multilingual-v3** for generating embeddings. This model natively supports 100+ languages without requiring translation, producing 1024-dimensional vectors optimized for semantic search. For retrieval, use **ColBERTv2** through the RAGatouille library, which provides late-interaction retrieval for higher accuracy on adversarial queries.
+
+### Translation Fallback
+Use **NLLB-200** from Meta for cases requiring explicit translation. Run this model locally via Hugging Face Transformers to avoid API costs at scale. NLLB covers 200 languages and runs efficiently on GPU.
+
+### Relational Database
+Use **PostgreSQL** (version 16) for user accounts, session management, audit logs, and remediation history. PostgreSQL handles transactional workloads reliably and integrates cleanly with FastAPI through SQLAlchemy or the async-native encode/databases library.
+
+### Real-Time Signals
+Use **X API v2** filtered stream endpoint to monitor mention velocity for entities appearing in high-risk claims. When an entity suddenly trends, the system triggers a decay re-evaluation for all claims referencing that entity.
+
+### LLM Integration
+Use the **Grok API** (xAI) for claim extraction and synthesis. Grok parses article text into structured claim objects containing the assertion, cited sources, confidence level, and temporal classification (mutable or immutable).
+
+### Frontend Framework
+Use **Next.js 14** with the App Router and React Server Components. Server components reduce client-side JavaScript and enable streaming responses for large data sets. Use **TypeScript** throughout for type safety.
+
+### Graph Visualization
+Use **D3.js** (version 7) for rendering the interactive dependency graph. D3 provides fine-grained control over force-directed layouts, zoom behavior, and node interactions. For very large graphs, implement WebGL rendering through **Sigma.js** as a fallback.
+
+### UI Components
+Use **Tailwind CSS** for styling and **shadcn/ui** for pre-built accessible components. This combination provides rapid development without sacrificing customization or accessibility compliance.
+
+### Deployment Infrastructure
+Containerize all services with **Docker** and orchestrate with **Kubernetes**. Use **NGINX** as the ingress controller and reverse proxy. For managed deployment, target **Vercel** for the Next.js frontend and **Railway** or **AWS ECS** for backend services.
+
+---
+
+## Database Schemas
+
+### Neo4j Graph Schema
+Each claim node contains: id (UUID), text (string), sourceUrl (string), articleId (string), extractedAt (datetime), decayScore (float 0-1), halfLifeDays (integer), isImmutable (boolean), contradictionCount (integer), language (string ISO code), and embedding (float array, optional for hybrid queries). Edges use the SUPPORTS relationship type with a weight property indicating citation strength.
+
+### Qdrant Collection Schema
+The main collection is named "claims" with vectors of dimension 1024. Payload fields include claimId, articleId, language, sourceUrl, and extractedAt. Create separate collections for each major language to optimize filtered searches.
+
+### PostgreSQL Tables
+The users table stores id, email, passwordHash, role, createdAt, and lastLogin. The remediations table stores id visually, claimId, userId, action (enum: verified, updated, flagged, dismissed), previousText, newText, and timestamp. The audit_logs table stores id, userId, action, targetType, targetId, metadata (JSONB), and timestamp.
+
+---
+
+## API Endpoints
+
+### Ingestion Service
+POST /api/ingest/article accepts a JSON body with articleId, title, content, and sourceUrls. It queues the article for claim extraction and returns a job ID. GET /api/ingest/status/{jobId} returns processing status.
+
+### Graph Service
+GET /api/graph/claim/{claimId} returns the claim with its immediate dependencies and dependents. GET /api/graph/impact/{claimId} returns the downstream impact score and list of affected claims. GET /api/graph/vulnerable returns paginated list of claims sorted by vulnerability score (dependency weight × decay probability × contradiction strength).
+
+### Retrieval Service
+POST /api/retrieve/adversarial accepts claimId and optional targetLanguages array. It runs adversarial retrieval and returns contradicting sources with confidence scores. POST /api/retrieve/similar accepts a text query and returns semantically similar claims.
+
+### Triage Service
+GET /api/triage/queue returns the prioritized remediation queue with pagination. POST /api/triage/action accepts claimId, action, and optional newText to record remediation decisions.
+
+### User Service
+Standard authentication endpoints: POST /api/auth/register, POST /api/auth/login, POST /api/auth/refresh, GET /api/users/me.
+
+---
+
+## Frontend Pages and Components
+
+### Pages
+The landing page at / displays a hero section explaining Antibody, live statistics (total claims monitored, vulnerabilities detected, remediations completed), and a call-to-action to view the dashboard. The dashboard at /dashboard requires authentication and contains the main triage interface with the vulnerability queue, graph explorer, and search. The graph explorer at /graph/{claimId} displays an interactive visualization of a claim's dependency network. The article view at /article/{articleId} shows all extracted claims from a single article with their individual health scores.
+
+### Core Components
+The VulnerabilityQueue component renders a sortable, filterable table of vulnerable claims with columns for claim text preview, decay score, contradiction count, dependency weight, combined vulnerability score, and action buttons. The DependencyGraph component renders the D3 force-directed graph with zoom, pan, click-to-expand, and color coding by vulnerability level. The ClaimCard component displays a single claim with its full text, source, decay forecast, contradicting sources list, and remediation history. The SearchBar component provides semantic search across all claims with language and date filters. The MetricsPanel component shows real-time statistics and trend charts for system health.
+
+---
+
+## Scalability Considerations
+
+### Horizontal Scaling
+All backend services are stateless and scale horizontally behind a load balancer. Celery workers scale independently based on queue depth. Neo4j supports causal clustering for read replicas. Qdrant shards collections automatically across nodes.
+
+### Caching Strategy
+Redis caches frequently accessed graph queries (top vulnerable claims, popular dependency chains) with a 5-minute TTL. The Next.js frontend uses ISR (Incremental Static Regeneration) for article pages with a 1-hour revalidation period. API responses include ETag headers for client-side caching.
+
+### Rate Limiting
+Implement rate limiting at the NGINX layer: 100 requests per minute for authenticated users, 20 for anonymous. External API calls (Grok, X, Cohere) use separate rate limiters with exponential backoff.
+
+### Database Optimization
+Neo4j indexes on claimId, articleId, decayScore, and contradictionCount. PostgreSQL indexes on foreign keys and frequently filtered columns. Qdrant uses HNSW indexes with ef=128 for accuracy-speed balance.
+
+### Async Processing
+All LLM calls, embedding generations, and external API requests run through Celery to prevent request blocking. WebSocket connections via Socket.io push real-time updates to the dashboard when new vulnerabilities are detected.
+
+---
+
+## File Structure
+
+```
+antibody/
+├── backend/
+│   ├── app/
+│   │   ├── main.py
+│   │   ├── config.py
+│   │   ├── models/
+│   │   │   ├── claim.py
+│   │   │   ├── user.py
+│   │   │   └── remediation.py
+│   │   ├── routers/
+│   │   │   ├── ingest.py
+│   │   │   ├── graph.py
+│   │   │   ├── retrieve.py
+│   │   │   ├── triage.py
+│   │   │   └── auth.py
+│   │   ├── services/
+│   │   │   ├── grok_client.py
+│   │   │   ├── neo4j_client.py
+│   │   │   ├── qdrant_client.py
+│   │   │   ├── x_api_client.py
+│   │   │   ├── embedding_service.py
+│   │   │   ├── decay_forecaster.py
+│   │   │   └── adversarial_retriever.py
+│   │   ├── workers/
+│   │   │   ├── celery_app.py
+│   │   │   ├── extraction_worker.py
+│   │   │   ├── retrieval_worker.py
+│   │   │   └── decay_worker.py
+│   │   └── utils/
+│   │       ├── auth.py
+│   │       └── rate_limiter.py
+│   ├── tests/
+│   ├── requirements.txt
+│   └── Dockerfile
+├── frontend/
+│   ├── app/
+│   │   ├── layout.tsx
+│   │   ├── page.tsx
+│   │   ├── dashboard/
+│   │   │   └── page.tsx
+│   │   ├── graph/
+│   │   │   └── [claimId]/
+│   │   │       └── page.tsx
+│   │   └── article/
+│   │       └── [articleId]/
+│   │           └── page.tsx
+│   ├── components/
+│   │   ├── VulnerabilityQueue.tsx
+│   │   ├── DependencyGraph.tsx
+│   │   ├── ClaimCard.tsx
+│   │   ├── SearchBar.tsx
+│   │   ├── MetricsPanel.tsx
+│   │   └── ui/
+│   ├── lib/
+│   │   ├── api.ts
+│   │   └── utils.ts
+│   ├── styles/
+│   │   └── globals.css
+│   ├── package.json
+│   ├── tailwind.config.ts
+│   └── Dockerfile
+├── docker-compose.yml
+├── kubernetes/
+│   ├── deployment.yaml
+│   ├── service.yaml
+│   └── ingress.yaml
+└── README.md
+```
+
+---
+
+## Implementation Order
+
+Begin with the backend foundation: set up FastAPI with health check endpoints, configure Neo4j and PostgreSQL connections, and implement basic authentication. Next, build the ingestion pipeline: create the Grok client for claim extraction, implement the Celery worker that processes articles, and store extracted claims in Neo4j. Then add the decay forecaster: build the classification model distinguishing mutable from immutable claims, integrate X API for real-time signals, and compute half-life scores. After that, implement adversarial retrieval: configure Qdrant, set up the Cohere embedding client, build the ColBERT retrieval pipeline, and create the endpoint that finds contradicting sources. Finally, build the frontend: implement the dashboard layout, create the D3 dependency graph visualization, build the triage queue interface, and connect all components to the backend API.
+
+---
+
+This specification provides everything needed to build a production-ready system. Each technology choice prioritizes scalability, and the modular architecture allows independent scaling of compute-intensive components like retrieval and embedding generation.
